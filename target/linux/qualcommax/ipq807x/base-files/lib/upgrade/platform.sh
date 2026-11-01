@@ -264,6 +264,24 @@ platform_do_upgrade() {
 		CI_DATA_UBIPART="rootfs"
 		nand_do_upgrade "$1"
 		;;
+	redmi,ax6-stock|\
+	xiaomi,ax3600-stock|\
+	xiaomi,ax9000-stock)
+		part_num="$(fw_printenv -n flag_boot_rootfs)"
+		if [ "$part_num" -eq "1" ]; then
+			CI_UBIPART="rootfs_1"
+			target_num=1
+			fw_setenv flag_try_sys2_failed 0
+		else
+			CI_UBIPART="rootfs"
+			target_num=0
+			fw_setenv flag_try_sys1_failed 0
+		fi
+		fw_setenv flag_boot_rootfs "$target_num"
+		fw_setenv flag_last_success "$target_num"
+		fw_setenv flag_boot_success 0
+		nand_do_upgrade "$1"
+		;;
 	spectrum,sax1v1k)
 		CI_KERNPART="0:HLOS"
 		CI_ROOTPART="rootfs"
