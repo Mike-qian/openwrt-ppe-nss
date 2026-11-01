@@ -1,0 +1,149 @@
+# 同步上游 ppe-nss 并自动重新适配 ax3600-stock
+#
+# 触发: GitHub 仓库页面 → Actions → 本工作流 → Run workflow (手动)
+# 行为:
+#   - 检测 upstream(JuliusBairaktaris/openwrt-ppe-nss) 相对当前分支是否有新提交
+#   - 有新提交: 先把 8 个被 ax3600-stock 适配改动过的文件还原到上游基线(避免合并冲突)
+#     → 合并上游 → 运行 scripts/apply_ax3600_stock.py 重新适配 → 提交并推送回本分支
+#   - 无新提交且已适配: 什么都不做 (对应"没有新的提交就什么都不做")
+#   - 无新提交但未适配(首次/初始化): 仍会补一次适配
+# 注意:
+#   - 本工作流只动 OpenWrt 源码; .github/ 与 scripts/apply_ax3600_stock.py 不在上游树内, 自然保留, 可反复复用
+#   - 若本分支受保护(protected), GITHUB_TOKEN 推送可能被拒; 需在分支保护里允许或改用有权限的 PAT
+#   - 若上游改动了适配所依赖的上下文导致脚本锚点找不到, 脚本会失败并中止(不会推送半成品), 需先修正 scripts/apply_ax3600_stock.py
+
+name: Sync upstream & auto-adapt ax3600-stock
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: "上游仓库 (owner/name)"
+        required: false
+        default: "JuliusBairaktaris/openwrt-ppe-nss"
+      upstream_branch:
+        description: "上游分支 (留空则使用 upstream/HEAD)"
+        required: false
+        default: "ppe-nss"
+      force:
+        description: "即使没有新提交也强制重新适配"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout 本仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 配置 git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 添加 upstream 远程并拉取
+        run: |
+          UP="${{ github.event.inputs.upstream_repo }}"
+          git remote add upstream "https://github.com/${UP}.git" 2>/dev/null \
+            || git remote set-url upstream "https://github.com/${UP}.git"
+          git fetch upstream
+
+      - name: 解析上游分支
+        id: branch
+        run: |
+          UB="${{ github.event.inputs.upstream_branch }}"
+          if [ -z "$UB" ]; then
+            UB="$(git rev-parse --abbrev-ref upstream/HEAD 2>/dev/null | sed 's#^upstream/##')"
+          fi
+          if [ -z "$UB" ]; then
+            echo "::error::无法解析上游分支，请在输入中指定 upstream_branch"
+            exit 1
+          fi
+          echo "branch=$UB" >> "$GITHUB_OUTPUT"
+          echo "上游分支 = $UB"
+
+      - name: 统计新提交并判断是否需要运行
+        id: check
+        run: |
+          UB="${{ steps.branch.outputs.branch }}"
+          NEW="$(git rev-list --count "HEAD..upstream/$UB")"
+          echo "new_commits=$NEW" >> "$GITHUB_OUTPUT"
+          echo "自 HEAD 以来的上游新提交数: $NEW"
+          if grep -q "ax3600-stock" target/linux/qualcommax/image/ipq807x.mk 2>/dev/null; then
+            APPLIED=true
+          else
+            APPLIED=false
+          fi
+          echo "adaptation_applied=$APPLIED" >> "$GITHUB_OUTPUT"
+          if [ "$NEW" -gt 0 ] || [ "${{ github.event.inputs.force }}" = "true" ] || [ "$APPLIED" = "false" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::无新提交且适配已应用，跳过。"
+          fi
+
+      - name: 无操作，结束
+        if: steps.check.outputs.should_run != 'true'
+        run: echo "无需操作，结束。"
+
+      - name: 还原被适配文件到上游基线 (避免合并冲突)
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          UB="${{ steps.branch.outputs.branch }}"
+          FILES=(
+            target/linux/qualcommax/image/ipq807x.mk
+            target/linux/qualcommax/ipq807x/base-files/lib/upgrade/platform.sh
+            target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds
+            target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network
+            target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata
+            target/linux/qualcommax/ipq807x/base-files/etc/init.d/bootcount
+            package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq807x
+          )
+          for f in "${FILES[@]}"; do
+            if git cat-file -e "upstream/$UB:$f" 2>/dev/null; then
+              git checkout "upstream/$UB" -- "$f"
+            else
+              echo "::warning::上游 $UB 不含 $f，跳过还原"
+            fi
+          done
+          git rm -f --ignore-unmatch target/linux/qualcommax/dts/ipq8071-ax3600-stock.dts || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: reset ax3600-stock adaptation to upstream baseline (pre-sync)"
+          else
+            echo "无需还原(适配文件已在上游基线)"
+          fi
+
+      - name: 合并上游
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          UB="${{ steps.branch.outputs.branch }}"
+          git merge "upstream/$UB" --no-edit --no-ff
+
+      - name: 重新适配 ax3600-stock
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          python3 scripts/apply_ax3600_stock.py .
+
+      - name: 提交并推送
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "::notice::合并/适配后无变化，无需提交。"
+            exit 0
+          fi
+          git add -A
+          MSG="sync: merge upstream/${{ steps.branch.outputs.branch }} & re-apply ax3600-stock adaptation"
+          git commit -m "$MSG"
+          git push origin "HEAD:${{ github.ref_name }}"
