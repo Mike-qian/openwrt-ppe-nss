@@ -1277,25 +1277,22 @@ hostapd_vendor_elements(struct ubus_context *ctx, struct ubus_object *obj,
 			return UBUS_STATUS_INVALID_ARGUMENT;
 
 	len /= 2;
-	if (len == 0) {
-		wpabuf_free(bss->vendor_elements);
-		bss->vendor_elements = NULL;
-		return 0;
-	}
+	elems = NULL;
+	if (len) {
+		elems = wpabuf_alloc(len);
+		if (elems == NULL)
+			return 1;
 
-	elems = wpabuf_alloc(len);
-	if (elems == NULL)
-		return 1;
-
-	if (hexstr2bin(pos, wpabuf_put(elems, len), len)) {
-		wpabuf_free(elems);
-		return UBUS_STATUS_INVALID_ARGUMENT;
+		if (hexstr2bin(pos, wpabuf_put(elems, len), len)) {
+			wpabuf_free(elems);
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		}
 	}
 
 	wpabuf_free(bss->vendor_elements);
 	bss->vendor_elements = elems;
 
-	/* update beacons if vendor elements were set successfully */
+	/* update beacons if vendor elements were set or cleared successfully */
 	if (ieee802_11_update_beacons(hapd->iface) != 0)
 		return UBUS_STATUS_NOT_SUPPORTED;
 	return UBUS_STATUS_OK;
