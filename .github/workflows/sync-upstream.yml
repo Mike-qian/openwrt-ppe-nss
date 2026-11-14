@@ -1,0 +1,593 @@
+name: Sync upstream & re-apply stock layouts
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: 'Upstream repo (owner/name)'
+        required: true
+        default: 'JuliusBairaktaris/openwrt-ppe-nss'
+      upstream_branch:
+        description: 'Upstream branch'
+        required: true
+        default: 'ppe-nss'
+      force_reapply:
+        description: 'Force re-apply even if no new commits'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/${{ github.event.inputs.upstream_repo }}.git || git remote set-url upstream https://github.com/${{ github.event.inputs.upstream_repo }}.git
+          git fetch upstream ${{ github.event.inputs.upstream_branch }}
+
+      - name: Check for new commits
+        id: check
+        run: |
+          UP=$(git rev-list HEAD..upstream/${{ github.event.inputs.upstream_branch }} | wc -l)
+          echo "new_commits=$UP" >> "$GITHUB_OUTPUT"
+          if [ "$UP" -eq "0" ] && [ "${{ github.event.inputs.force_reapply }}" != "true" ]; then
+            echo "no_new_commits=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_new_commits=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync upstream (merge -X theirs + re-apply stock layouts)
+        if: steps.check.outputs.no_new_commits == 'false'
+        run: |
+          UB="${{ github.event.inputs.upstream_branch }}"
+          # 上游演进可能改动非适配文件；-X theirs 对所有冲突（含 add/add）一律取上游，
+          # 然后由下面的脚本重打适配覆盖回去。无需 force-push，且自动保留 .github/ 专属文件。
+          if ! git merge -X theirs --no-commit --no-edit upstream/$UB; then
+            git checkout --theirs . 2>/dev/null || true
+            git add -A
+          fi
+          python3 - . <<'PY'
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+          """
+          ax3600/ax6/ax9000 stock 适配补丁脚本（幂等）
+          把 immortalwrt owrt 的 xiaomi_ax3600-stock / redmi_ax6-stock / xiaomi_ax9000-stock
+          支持应用到 OpenWrt qualcommax/ipq807x 源码树（基于上游 master，base DTS 用
+          fixed-partitions，因此需要显式写 &qpic_nand smem-part 块）。
+          
+          用法:
+              python apply_ax3600_stock.py [源码树路径]
+              源码树路径默认为 C:/Users/Mike1/Downloads/openwrt-ppe-nss-ppe-nss
+          
+          特性:
+              - 幂等：已应用的修改会跳过，可重复运行
+              - 每个修改先验证锚点存在，找不到时报错并指出文件
+              - 同时写入各设备的 stock 布局 DTS 新文件
+          """
+          
+          import os
+          import sys
+          
+          TREE = sys.argv[1] if len(sys.argv) > 1 else r"C:/Users/Mike1/Downloads/openwrt-ppe-nss-ppe-nss"
+          
+          # ---------------------------------------------------------------------------
+          # DTS 内容（长版：base DTS 用 fixed-partitions，stock 需显式改 smem-part）
+          # ---------------------------------------------------------------------------
+          
+          DTS_AX3600 = '''// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+          /*
+           * Copyright (c) 2020, 2021, 2022, 2023, 2024, 2025
+           * Chukun Pan
+           */
+          
+          #include "ipq8071-ax3600.dts"
+          
+          / {
+          \tmodel = "Xiaomi AX3600 (stock layout)";
+          \tcompatible = "xiaomi,ax3600-stock", "qcom,ipq8074";
+          
+          \tchosen {
+          \t\tbootargs-append = " root=/dev/ubiblock0_1";
+          \t};
+          };
+          
+          &qpic_nand {
+          \t/delete-node/ partitions;
+          
+          \tnand@0 {
+          \t\t/delete-node/ partitions;
+          
+          \t\tpartitions {
+          \t\t\tcompatible = "qcom,smem-part";
+          
+          \t\t\tpartition-0-art {
+          \t\t\t\tlabel = "0:art";
+          \t\t\t\tread-only;
+          
+          \t\t\t\tnvmem-layout {
+          \t\t\t\t\tcompatible = "fixed-layout";
+          \t\t\t\t\t#address-cells = <1>;
+          \t\t\t\t\t#size-cells = <1>;
+          
+          \t\t\t\t\tmacaddr_dp2: macaddr@6 {
+          \t\t\t\t\t\treg = <0x6 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp3: macaddr@c {
+          \t\t\t\t\t\treg = <0xc 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp4: macaddr@12 {
+          \t\t\t\t\t\treg = <0x12 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp5: macaddr@18 {
+          \t\t\t\t\t\treg = <0x18 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tcaldata_qca9889: caldata@4d000 {
+          \t\t\t\t\t\treg = <0x33000 0x844>;
+          \t\t\t\t\t}
+          
+                              caldata_art_1000: calibration@1000 {
+                                  reg = <0x1000 0x20000>;
+                              };;
+          \t\t\t\t};
+          \t\t\t};
+          \t\t};
+          \t};
+          };
+          '''
+          
+          DTS_AX6 = '''// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+          /*
+           * Copyright (c) 2020, 2021, 2022, 2023, 2024, 2025
+           * Chukun Pan
+           */
+          
+          #include "ipq8071-ax6.dts"
+          
+          / {
+          \tmodel = "Redmi AX6 (stock layout)";
+          \tcompatible = "redmi,ax6-stock", "qcom,ipq8074";
+          
+          \tchosen {
+          \t\tbootargs-append = " root=/dev/ubiblock0_1";
+          \t};
+          };
+          
+          &qpic_nand {
+          \t/delete-node/ partitions;
+          
+          \tnand@0 {
+          \t\t/delete-node/ partitions;
+          
+          \t\tpartitions {
+          \t\t\tcompatible = "qcom,smem-part";
+          
+          \t\t\tpartition-0-art {
+          \t\t\t\tlabel = "0:art";
+          \t\t\t\tread-only;
+          
+          \t\t\t\tnvmem-layout {
+          \t\t\t\t\tcompatible = "fixed-layout";
+          \t\t\t\t\t#address-cells = <1>;
+          \t\t\t\t\t#size-cells = <1>;
+          
+          \t\t\t\t\tmacaddr_dp2: macaddr@6 {
+          \t\t\t\t\t\treg = <0x6 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp3: macaddr@c {
+          \t\t\t\t\t\treg = <0xc 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp4: macaddr@12 {
+          \t\t\t\t\t\treg = <0x12 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp5: macaddr@18 {
+          \t\t\t\t\t\treg = <0x18 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tcaldata_qca9889: caldata@4d000 {
+          \t\t\t\t\t\treg = <0x33000 0x844>;
+          \t\t\t\t\t}
+          
+                              caldata_art_1000: calibration@1000 {
+                                  reg = <0x1000 0x20000>;
+                              };;
+          \t\t\t\t};
+          \t\t\t};
+          \t\t};
+          \t};
+          };
+          '''
+          
+          DTS_AX9000 = '''// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+          /*
+           * Copyright (c) 2020, 2021, 2022, 2023, 2024, 2025
+           * Chukun Pan
+           */
+          
+          #include "ipq8072-ax9000.dts"
+          
+          / {
+          \tmodel = "Xiaomi AX9000 (stock layout)";
+          \tcompatible = "xiaomi,ax9000-stock", "qcom,ipq8074";
+          
+          \taliases {
+          \t\t/* Aliases as required by u-boot to patch MAC addresses */
+          \t\tethernet1 = &lan4;
+          \t\tethernet2 = &lan3;
+          \t\tethernet3 = &lan2;
+          \t\tethernet4 = &lan1;
+          \t\tethernet5 = &wan;
+          \t};
+          
+          \tchosen {
+          \t\tbootargs-append = " root=/dev/ubiblock0_1";
+          \t};
+          };
+          
+          &qpic_nand {
+          \t/delete-node/ partitions;
+          
+          \tnand@0 {
+          \t\t/delete-node/ partitions;
+          
+          \t\tpartitions {
+          \t\t\tcompatible = "qcom,smem-part";
+          
+          \t\t\tpartition-0-art {
+          \t\t\t\tlabel = "0:art";
+          \t\t\t\tread-only;
+          
+          \t\t\t\tnvmem-layout {
+          \t\t\t\t\tcompatible = "fixed-layout";
+          \t\t\t\t\t#address-cells = <1>;
+          \t\t\t\t\t#size-cells = <1>;
+          
+          \t\t\t\t\tmacaddr_dp1: macaddr@0 {
+          \t\t\t\t\t\treg = <0x0 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp2: macaddr@6 {
+          \t\t\t\t\t\treg = <0x6 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp3: macaddr@c {
+          \t\t\t\t\t\treg = <0xc 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp4: macaddr@12 {
+          \t\t\t\t\t\treg = <0x12 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tmacaddr_dp5: macaddr@18 {
+          \t\t\t\t\t\treg = <0x18 0x6>;
+          \t\t\t\t\t};
+          
+          \t\t\t\t\tcaldata_qca9889: caldata@4d000 {
+          \t\t\t\t\t\treg = <0x4d000 0x844>;
+          \t\t\t\t\t}
+          
+                              caldata_art_1000: calibration@1000 {
+                                  reg = <0x1000 0x20000>;
+                              };;
+          \t\t\t\t};
+          \t\t\t};
+          \t\t};
+          \t};
+          };
+          '''
+          
+          # (相对路径, 说明, 旧文本, 新文本)
+          EDITS = [
+              # ---- mk: base 设备标注 expand layout 变体 ----
+              (
+                  "target/linux/qualcommax/image/ipq807x.mk",
+                  "base xiaomi_ax3600 标注 expand layout 变体",
+                  "define Device/xiaomi_ax3600\n"
+                  "\t$(call Device/FitImage)\n"
+                  "\t$(call Device/UbiFit)\n"
+                  "\tDEVICE_VENDOR := Xiaomi\n"
+                  "\tDEVICE_MODEL := AX3600\n"
+                  "\tBLOCKSIZE := 128k",
+                  "define Device/xiaomi_ax3600\n"
+                  "\t$(call Device/FitImage)\n"
+                  "\t$(call Device/UbiFit)\n"
+                  "\tDEVICE_VENDOR := Xiaomi\n"
+                  "\tDEVICE_MODEL := AX3600\n"
+                  "\tDEVICE_VARIANT := (OpenWrt expand layout)\n"
+                  "\tBLOCKSIZE := 128k",
+              ),
+              # ---- mk: 新增 xiaomi_ax3600-stock 设备定义 ----
+              (
+                  "target/linux/qualcommax/image/ipq807x.mk",
+                  "新增 xiaomi_ax3600-stock 设备定义",
+                  "endef\nTARGET_DEVICES += xiaomi_ax3600\n\ndefine Device/xiaomi_ax9000",
+                  "endef\nTARGET_DEVICES += xiaomi_ax3600\n\n"
+                  "define Device/xiaomi_ax3600-stock\n"
+                  "\t$(call Device/xiaomi_ax3600)\n"
+                  "\tDEVICE_VARIANT := (stock layout)\n"
+                  "\tDEVICE_ALT0_VENDOR := Xiaomi\n"
+                  "\tDEVICE_ALT0_MODEL := AX3600\n"
+                  "\tDEVICE_ALT0_VARIANT := (custom U-Boot layout)\n"
+                  "\tKERNEL_SIZE :=\n"
+                  "\tARTIFACTS :=\n"
+                  "endef\n"
+                  "TARGET_DEVICES += xiaomi_ax3600-stock\n\n"
+                  "define Device/xiaomi_ax9000",
+              ),
+              # ---- mk: 新增 redmi_ax6-stock 设备定义 ----
+              (
+                  "target/linux/qualcommax/image/ipq807x.mk",
+                  "新增 redmi_ax6-stock 设备定义",
+                  "TARGET_DEVICES += redmi_ax6\n\ndefine Device/spectrum_sax1v1k",
+                  "TARGET_DEVICES += redmi_ax6\n\n"
+                  "define Device/redmi_ax6-stock\n"
+                  "\t$(call Device/redmi_ax6)\n"
+                  "\tDEVICE_VARIANT := (stock layout)\n"
+                  "\tDEVICE_ALT0_VENDOR := Redmi\n"
+                  "\tDEVICE_ALT0_MODEL := AX6\n"
+                  "\tDEVICE_ALT0_VARIANT := (custom U-Boot layout)\n"
+                  "\tKERNEL_SIZE :=\n"
+                  "\tARTIFACTS :=\n"
+                  "endef\n"
+                  "TARGET_DEVICES += redmi_ax6-stock\n\n"
+                  "define Device/spectrum_sax1v1k",
+              ),
+              # ---- mk: 新增 xiaomi_ax9000-stock 设备定义 ----
+              (
+                  "target/linux/qualcommax/image/ipq807x.mk",
+                  "新增 xiaomi_ax9000-stock 设备定义",
+                  "TARGET_DEVICES += xiaomi_ax9000\n\ndefine Device/yuncore_ax880",
+                  "TARGET_DEVICES += xiaomi_ax9000\n\n"
+                  "define Device/xiaomi_ax9000-stock\n"
+                  "\t$(call Device/xiaomi_ax9000)\n"
+                  "\tDEVICE_VARIANT := (stock layout)\n"
+                  "\tDEVICE_ALT0_VENDOR := Xiaomi\n"
+                  "\tDEVICE_ALT0_MODEL := AX9000\n"
+                  "\tDEVICE_ALT0_VARIANT := (custom U-Boot layout)\n"
+                  "\tKERNEL_SIZE :=\n"
+                  "\tARTIFACTS :=\n"
+                  "endef\n"
+                  "TARGET_DEVICES += xiaomi_ax9000-stock\n\n"
+                  "define Device/yuncore_ax880",
+              ),
+              # ---- platform.sh: stock 双分区升级 case（三设备共用）----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/lib/upgrade/platform.sh",
+                  "stock 双分区升级 case",
+                  '\t\t# Kernel and rootfs are placed in 2 different UBI\n'
+                  '\t\tCI_KERN_UBIPART="ubi_kernel"\n'
+                  '\t\tCI_ROOT_UBIPART="rootfs"\n'
+                  '\t\tCI_DATA_UBIPART="rootfs"\n'
+                  '\t\tnand_do_upgrade "$1"\n'
+                  "\t\t;;\n"
+                  "\tspectrum,sax1v1k)",
+                  '\t\t# Kernel and rootfs are placed in 2 different UBI\n'
+                  '\t\tCI_KERN_UBIPART="ubi_kernel"\n'
+                  '\t\tCI_ROOT_UBIPART="rootfs"\n'
+                  '\t\tCI_DATA_UBIPART="rootfs"\n'
+                  '\t\tnand_do_upgrade "$1"\n'
+                  "\t\t;;\n"
+                  "\tredmi,ax6-stock|\\\n"
+                  "\txiaomi,ax3600-stock|\\\n"
+                  "\txiaomi,ax9000-stock)\n"
+                  '\t\tpart_num="$(fw_printenv -n flag_boot_rootfs)"\n'
+                  '\t\tif [ "$part_num" -eq "1" ]; then\n'
+                  '\t\t\tCI_UBIPART="rootfs_1"\n'
+                  "\t\t\ttarget_num=1\n"
+                  "\t\t\tfw_setenv flag_try_sys2_failed 0\n"
+                  "\t\telse\n"
+                  '\t\t\tCI_UBIPART="rootfs"\n'
+                  "\t\t\ttarget_num=0\n"
+                  "\t\t\tfw_setenv flag_try_sys1_failed 0\n"
+                  "\t\tfi\n"
+                  '\t\tfw_setenv flag_boot_rootfs "$target_num"\n'
+                  '\t\tfw_setenv flag_last_success "$target_num"\n'
+                  '\t\tfw_setenv flag_boot_success 0\n'
+                  '\t\tnand_do_upgrade "$1"\n'
+                  "\t\t;;\n"
+                  "\tspectrum,sax1v1k)",
+              ),
+              # ---- 01_leds: ax3600-stock ----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds",
+                  "LED 配置增加 ax3600-stock 变体",
+                  'xiaomi,ax3600)\n'
+                  '\tucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:01:green:wan" "wan" "tx rx link_10 link_100 link_1000"',
+                  'xiaomi,ax3600|\\\n'
+                  'xiaomi,ax3600-stock)\n'
+                  '\tucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:01:green:wan" "wan" "tx rx link_10 link_100 link_1000"',
+              ),
+              # ---- 01_leds: ax6-stock ----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds",
+                  "LED 配置增加 ax6-stock 变体",
+                  'redmi,ax6)\n'
+                  '\tucidef_set_led_netdev "wan" "WAN" "blue:network" "wan"',
+                  'redmi,ax6|\\\n'
+                  'redmi,ax6-stock)\n'
+                  '\tucidef_set_led_netdev "wan" "WAN" "blue:network" "wan"',
+              ),
+              # ---- 01_leds: ax9000-stock ----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/board.d/01_leds",
+                  "LED 配置增加 ax9000-stock 变体",
+                  'xiaomi,ax9000)\n'
+                  '\tucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:18:green:wan" "wan" "tx rx link_10 link_100 link_1000 link_2500"',
+                  'xiaomi,ax9000|\\\n'
+                  'xiaomi,ax9000-stock)\n'
+                  '\tucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:18:green:wan" "wan" "tx rx link_10 link_100 link_1000 link_2500"',
+              ),
+              # ---- 02_network: redmi,ax6 组增加 ax6-stock / ax3600-stock ----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network",
+                  "网络配置增加 ax6-stock / ax3600-stock 变体",
+                  "\tredmi,ax6|\\\n"
+                  "\tspectrum,sax1v1k|\\\n"
+                  "\txiaomi,ax3600)",
+                  "\tredmi,ax6|\\\n"
+                  "\tredmi,ax6-stock|\\\n"
+                  "\tspectrum,sax1v1k|\\\n"
+                  "\txiaomi,ax3600|\\\n"
+                  "\txiaomi,ax3600-stock)",
+              ),
+              # ---- 02_network: xiaomi,ax9000 组增加 ax9000-stock ----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/board.d/02_network",
+                  "网络配置增加 ax9000-stock 变体",
+                  "\txiaomi,ax9000|\\\n"
+                  "\tzbtlink,zbt-z800ax)",
+                  "\txiaomi,ax9000|\\\n"
+                  "\txiaomi,ax9000-stock|\\\n"
+                  "\tzbtlink,zbt-z800ax)",
+              ),
+              # ---- 11-ath11k-caldata: QCN9074 段 ax9000-stock 变体 ----
+              # 本树(上游 OpenWrt master qualcommax)的 ax3600/ax6 校准走 nvmem
+              # (stock DTS 继承 base 的 wifi nvmem-cells = <&caldata_qca9889>),不在
+              # hotplug 段,故无需在此加;仅 ax9000 带 QCN9074(PCIe 无线)需在此段取
+              # 校准,补 ax9000-stock 变体即可。
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata",
+                  "校准数据提取增加 ax9000-stock 变体",
+                  "xiaomi,ax9000)\n",
+                  "xiaomi,ax9000|\\\n"
+                  "xiaomi,ax9000-stock)\n",
+              ),
+              # ---- init.d/bootcount: bootcount 增加三 stock 变体 ----
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/init.d/bootcount",
+                  "bootcount 增加 stock 变体",
+                  "\tnetgear,wax620|\\\n"
+                  "\tnetgear,wax630)\n"
+                  "\t\tfw_setenv boot_count 0\n"
+                  "\t;;\n"
+                  "\tesac",
+                  "\tnetgear,wax620|\\\n"
+                  "\tnetgear,wax630)\n"
+                  "\t\tfw_setenv boot_count 0\n"
+                  "\t;;\n"
+                  "\tredmi,ax6-stock|\\\n"
+                  "\txiaomi,ax3600-stock|\\\n"
+                  "\txiaomi,ax9000-stock)\n"
+                  "\t\tfw_setenv flag_ota_reboot 0 || true\n"
+                  "\t\tfw_setenv flag_boot_success 1 || true\n"
+                  "\t;;\n"
+                  "\tesac",
+              ),
+              # ---- uboot-envtools: 增加三 stock 变体 ----
+              (
+                  "package/boot/uboot-tools/uboot-envtools/files/qualcommax_ipq807x",
+                  "uboot-envtools 增加 stock 变体",
+                  "redmi,ax6|\\\n"
+                  "xiaomi,ax3600|\\\n"
+                  "xiaomi,ax9000)",
+                  "redmi,ax6|\\\n"
+                  "redmi,ax6-stock|\\\n"
+                  "xiaomi,ax3600|\\\n"
+                  "xiaomi,ax3600-stock|\\\n"
+                  "xiaomi,ax9000|\\\n"
+                  "xiaomi,ax9000-stock)",
+              ),
+          ]
+          
+          # (相对路径, 说明, 内容, 已应用判定串)
+          DTS_FILES = [
+              ("target/linux/qualcommax/dts/ipq8071-ax3600-stock.dts",
+               "ipq8071-ax3600-stock.dts", DTS_AX3600, "xiaomi,ax3600-stock"),
+              ("target/linux/qualcommax/dts/ipq8071-ax6-stock.dts",
+               "ipq8071-ax6-stock.dts", DTS_AX6, "redmi,ax6-stock"),
+              ("target/linux/qualcommax/dts/ipq8072-ax9000-stock.dts",
+               "ipq8072-ax9000-stock.dts", DTS_AX9000, "xiaomi,ax9000-stock"),
+          ]
+          
+          
+          def main():
+              if not os.path.isdir(TREE):
+                  sys.exit("错误：源码树路径不存在: %s" % TREE)
+          
+              applied, skipped, failed = 0, 0, 0
+          
+              for rel, desc, old, new in EDITS:
+                  path = os.path.join(TREE, rel)
+                  if not os.path.isfile(path):
+                      print("[FAIL] %s：文件不存在 (%s)" % (desc, rel))
+                      failed += 1
+                      continue
+                  with open(path, "r", encoding="utf-8", newline="") as f:
+                      content = f.read()
+                  if new in content:
+                      print("[SKIP] %s：已应用" % desc)
+                      skipped += 1
+                      continue
+                  if old not in content:
+                      print("[FAIL] %s：锚点未找到，请人工检查 (%s)" % (desc, rel))
+                      failed += 1
+                      continue
+                  # 保留原文件换行符风格
+                  nl = "\r\n" if "\r\n" in content else "\n"
+                  old_n = old.replace("\n", nl) if nl != "\n" else old
+                  new_n = new.replace("\n", nl) if nl != "\n" else new
+                  content = content.replace(old_n, new_n, 1)
+                  with open(path, "w", encoding="utf-8", newline="") as f:
+                      f.write(content)
+                  print("[OK]   %s" % desc)
+                  applied += 1
+          
+              for rel, desc, dts, compat in DTS_FILES:
+                  dts_path = os.path.join(TREE, rel)
+                  if os.path.isfile(dts_path):
+                      with open(dts_path, "r", encoding="utf-8", newline="") as f:
+                          existing = f.read()
+                      if (compat in existing) and ("qcom,smem-part" in existing):
+                          print("[SKIP] %s：已存在且内容正确" % desc)
+                          skipped += 1
+                      else:
+                          with open(dts_path, "w", encoding="utf-8", newline="") as f:
+                              f.write(dts)
+                          print("[OK]   %s：内容已更新" % desc)
+                          applied += 1
+                  else:
+                      with open(dts_path, "w", encoding="utf-8", newline="") as f:
+                          f.write(dts)
+                      print("[OK]   %s：已创建" % desc)
+                      applied += 1
+          
+              print("\n结果：应用 %d 项，跳过 %d 项，失败 %d 项" % (applied, skipped, failed))
+              if failed:
+                  sys.exit(1)
+          
+          
+          if __name__ == "__main__":
+              main()
+          PY
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit -m "sync: merge upstream $UB and re-apply ax3600/ax6/ax9000 stock layouts"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: No new commits
+        if: steps.check.outputs.no_new_commits == 'true'
+        run: echo "Upstream has no new commits; nothing to do."
