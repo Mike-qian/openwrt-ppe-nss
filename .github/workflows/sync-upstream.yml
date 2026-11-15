@@ -108,7 +108,13 @@ jobs:
           };
           
           &qpic_nand {
-          \t/delete-node/ partitions;
+          \t/*
+          \t * Keep the dummy disabled "partitions" node from the base DTSI.
+          \t * The bootloader follows the first controller child and rewrites its
+          \t * partitions with legacy SMEM bindings; deleting the dummy makes it
+          \t * rewrite nand@0/partitions instead, which destroys the NVMEM cells
+          \t * below and leaves every calibration reference dangling.
+          \t */
           
           \tnand@0 {
           \t\t/delete-node/ partitions;
@@ -206,7 +212,13 @@ jobs:
           };
           
           &qpic_nand {
-          \t/delete-node/ partitions;
+          \t/*
+          \t * Keep the dummy disabled "partitions" node from the base DTSI.
+          \t * The bootloader follows the first controller child and rewrites its
+          \t * partitions with legacy SMEM bindings; deleting the dummy makes it
+          \t * rewrite nand@0/partitions instead, which destroys the NVMEM cells
+          \t * below and leaves every calibration reference dangling.
+          \t */
           
           \tnand@0 {
           \t\t/delete-node/ partitions;
@@ -309,7 +321,13 @@ jobs:
           };
           
           &qpic_nand {
-          \t/delete-node/ partitions;
+          \t/*
+          \t * Keep the dummy disabled "partitions" node from the base DTSI.
+          \t * The bootloader follows the first controller child and rewrites its
+          \t * partitions with legacy SMEM bindings; deleting the dummy makes it
+          \t * rewrite nand@0/partitions instead, which destroys the NVMEM cells
+          \t * below and leaves every calibration reference dangling.
+          \t */
           
           \tnand@0 {
           \t\t/delete-node/ partitions;
@@ -566,6 +584,26 @@ jobs:
                   "\txiaomi,ax9000-stock|\\\n"
                   "\tzbtlink,zbt-z800ax)",
               ),
+              # ---- 11-ath11k-caldata: IPQ8074 主 radio 校准兜底（三 stock 变体）----
+              # stock 布局用 qcom,smem-part 动态分区，上游 c9cf0b0 明确说明这类板子
+              # "have no partition node to hold the cell and stay on the script"。
+              # DTS nvmem cell 一旦读不到（U-Boot fixup / phandle / NVMEM 未注册），
+              # ath11k 会 fallback 到 cal-ahb-c000000.wifi.bin，必须有 hotplug 兜底。
+              (
+                  "target/linux/qualcommax/ipq807x/base-files/etc/hotplug.d/firmware/11-ath11k-caldata",
+                  "ath11k 主 radio 校准提取增加三个 stock 变体（SMEM 布局兜底）",
+                  "\tarcadyan,aw1000|\\\n"
+                  "\tbuffalo,wxr-5950ax12|\\\n"
+                  "\tcmcc,rm2-6|\\\n"
+                  "\tnetgear,wax218)\n",
+                  "\tarcadyan,aw1000|\\\n"
+                  "\tbuffalo,wxr-5950ax12|\\\n"
+                  "\tcmcc,rm2-6|\\\n"
+                  "\tnetgear,wax218|\\\n"
+                  "\tredmi,ax6-stock|\\\n"
+                  "\txiaomi,ax3600-stock|\\\n"
+                  "\txiaomi,ax9000-stock)\n",
+              ),
               # ---- 11-ath11k-caldata: QCN9074 段 ax9000-stock 变体 ----
               # 本树(上游 OpenWrt master qualcommax)的 ax3600/ax6 校准走 nvmem
               # (stock DTS 继承 base 的 wifi nvmem-cells = <&caldata_qca9889>),不在
@@ -663,7 +701,7 @@ jobs:
                   if os.path.isfile(dts_path):
                       with open(dts_path, "r", encoding="utf-8", newline="") as f:
                           existing = f.read()
-                      if (compat in existing) and ("qcom,smem-part" in existing) and ("};;" not in existing) and ("stock_caldata_art_1000" in existing) and ("Rebind NVMEM consumers" in existing):
+                      if (compat in existing) and ("qcom,smem-part" in existing) and ("};;" not in existing) and ("stock_caldata_art_1000" in existing) and ("Rebind NVMEM consumers" in existing) and ("Keep the dummy disabled" in existing):
                           print("[SKIP] %s：已存在且内容正确" % desc)
                           skipped += 1
                       else:

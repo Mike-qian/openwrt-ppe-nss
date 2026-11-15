@@ -16,7 +16,13 @@
 };
 
 &qpic_nand {
-	/delete-node/ partitions;
+	/*
+	 * Keep the dummy disabled "partitions" node from the base DTSI.
+	 * The bootloader follows the first controller child and rewrites its
+	 * partitions with legacy SMEM bindings; deleting the dummy makes it
+	 * rewrite nand@0/partitions instead, which destroys the NVMEM cells
+	 * below and leaves every calibration reference dangling.
+	 */
 
 	nand@0 {
 		/delete-node/ partitions;
